@@ -110,15 +110,15 @@ def main() -> None:
     print(f"Relationships: {len(result['role_structure']['relationships'])}")
 
     v = result["quote_verification"]
-    tiers = ", ".join(f"{tier} {n}" for tier, n in v["by_match_tier"].items() if n)
-    print(f"Quotes verified: {v['verified_quotes']}/{v['total_quotes']}" + (f" ({tiers})" if tiers else ""))
+    tiers = ", ".join(f"{tier} {n}" for tier, n in v["by_verbatim_tier"].items() if n)
+    print(f"Quotes verbatim: {v['verbatim_quotes']}/{v['total_quotes']}" + (f" ({tiers})" if tiers else ""))
 
-    for item in v["unverified_detail"]:
-        print(f"UNVERIFIED {item['owner']}: {item['text'][:100]!r}", file=sys.stderr)
+    for item in v["hallucinated_detail"]:
+        print(f"HALLUCINATED {item['owner']}: {item['text'][:100]!r}", file=sys.stderr)
     for problem in v["dangling_role_ids"]:
         print(f"DANGLING {problem}", file=sys.stderr)
 
-    if args.strict and (v["unverified_quotes"] or v["dangling_role_ids"]):
+    if args.strict and (v["hallucinated_quotes"] or v["dangling_role_ids"]):
         sys.exit(1)
 
 

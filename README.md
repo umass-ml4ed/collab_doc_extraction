@@ -29,9 +29,9 @@ uv run python extract_roles.py "path/to/document.pdf" --output-dir results/
 uv run python pdf_to_text.py "path/to/document.pdf"
 ```
 
-The run prints the roles it found, a `Quotes verified: N/M` tally, and writes the JSON.
-Any quote it couldn't find in the source document is printed to stderr as an
-`UNVERIFIED` line — see [Quote verification](#quote-verification).
+The run prints the roles it found, a `Quotes verbatim: N/M` tally, and writes the JSON.
+Any quote it couldn't find in the source document is printed to stderr as a
+`HALLUCINATED` line — see [Quote verification](#quote-verification).
 
 Input PDFs and extraction results are gitignored; this repo is the pipeline only.
 
@@ -58,8 +58,11 @@ PDF ──pdf_to_text.py──> plain text ──prompts/*.j2──> prompt
 | `schema.py` | JSON Schema handed to OpenAI structured outputs, in strict mode. |
 | `extract_roles.py` | Orchestrates the above and wraps the result in a provenance envelope. |
 
-Runs use `temperature=0` and a fixed seed, so repeat extractions of the same document
-are close to deterministic — though not guaranteed identical.
+Runs use `temperature=0` and a fixed seed, but **extraction is not reproducible in
+practice** — repeat runs on the same PDF have returned anywhere from 10 to 38 supporting
+quotes, with roles and relationships varying alongside. Verification (`verify.py`) is
+fully deterministic; the model call in front of it is not. Treat any single extraction as
+one sample, not the answer.
 
 ### Output shape
 
@@ -91,8 +94,7 @@ are close to deterministic — though not guaranteed identical.
         {
           "text": "verbatim text from the PDF",
           "location": "section or page, or null",
-          "verified": true,                    // checked against the source, not model-asserted
-          "match_tier": "exact",               // exact | normalized | loose | null
+          "verbatim": "exact",                 // exact | normalized | loose | hallucinated
           "repaired": false                    // true if split out of a stitched quote
         }
       ],
@@ -134,24 +136,32 @@ pipeline, never by the LLM.
 Every supporting quote is checked against the source document by exact string
 containment before the JSON is written (`verify.py`). No LLM is involved and nothing is
 fuzzy — a quote either matches under a named normalization tier or it is marked
-unverified. Each quote carries the result:
+hallucinated.
+
+Verification is **additive to the spec schema**: the spec's `supporting_quotes` object
+is `{text, location}`, and those fields are left untouched. Two fields are added
+alongside them:
 
 ```jsonc
-{ "text": "...", "location": "Page 2", "verified": true, "match_tier": "exact", "repaired": false }
+{ "text": "...", "location": "Page 2", "verbatim": "exact", "repaired": false }
 ```
 
 The tiers exist because pypdf's extraction is lossy in known ways, not to give the model
 latitude. They're tried in order, first hit wins, so the recorded tier also says how far
 the quote drifted:
 
-| `match_tier` | What it tolerates | Read it as |
+| `verbatim` | What it tolerates | Read it as |
 | --- | --- | --- |
-| `exact` | Whitespace collapsing only | Character-for-character verbatim |
-| `normalized` | Unicode punctuation folded, soft hyphens and line-break hyphenation undone | Verbatim; the difference is a PDF artifact |
-| `loose` | Case and all non-alphanumeric characters | Wording matches, punctuation was rewritten — worth a glance |
-| `null` | — | **Unverified.** Not found in the document |
+| `"exact"` | Whitespace collapsing only | Character-for-character verbatim |
+| `"normalized"` | Unicode punctuation folded, soft hyphens and line-break hyphenation undone | Verbatim; the difference is a PDF artifact |
+| `"loose"` | Case and all non-alphanumeric characters | Wording matches, punctuation was rewritten — worth a glance |
+| `"hallucinated"` | — | **Not in the document.** The model made it up |
 
-No tier tolerates different *wording*, so a paraphrase always lands in `null`.
+No tier tolerates different *wording*, so a paraphrase always lands in `"hallucinated"`.
+
+The mark for a fabricated quote is the string `"hallucinated"`, never `null`. A consumer
+that forgets to check gets something conspicuous rather than a falsy blank that reads
+like "no data".
 
 **Stitched quotes** are the model's characteristic failure on table-shaped documents,
 in two forms. Both get split into one quote object per span, each flagged
@@ -173,33 +183,36 @@ remaining failure mode is the model eliding an interior clause without an ellips
 doesn't have. Splitting into arbitrarily many spans would accept any reassembly of
 document phrases and defeat the check, so these stay flagged for a human.
 
-**Unverified quotes are kept, not dropped**, so a reviewer can see what the model
-claimed and judge it. They're printed to stderr as `UNVERIFIED` lines and counted in
-the `quote_verification` block:
+**Hallucinated quotes are kept, not dropped**, so a reviewer can see what the model
+claimed and judge it. They keep the same shape as every other quote — no separate code
+path — are printed to stderr as `HALLUCINATED` lines, and are counted in the
+`quote_verification` block:
 
 ```jsonc
 "quote_verification": {
   "total_quotes": 29,
-  "verified_quotes": 24,
-  "unverified_quotes": 5,
-  "by_match_tier": { "exact": 24, "normalized": 0, "loose": 0 },
+  "verbatim_quotes": 24,
+  "hallucinated_quotes": 5,
+  "by_verbatim_tier": { "exact": 24, "normalized": 0, "loose": 0 },
   "repaired_quotes": 6,
-  "unverified_detail": [ { "owner": "relationship 2", "text": "..." } ],
+  "hallucinated_detail": [ { "owner": "relationship 2", "text": "..." } ],
   "dangling_role_ids": []
 }
 ```
 
-(Real numbers from `Western Films Job Descriptions.pdf`, a heavily table-formatted
-document — the hardest case in the corpus so far.)
+Counts are from one run against `Western Films Job Descriptions.pdf`, the most heavily
+table-formatted document in the corpus. Because extraction varies run to run, these
+numbers describe that sample rather than the document — other runs on the same PDF have
+come back fully clean.
 
 `dangling_role_ids` catches the other checkable claim: a relationship referencing a
 `role_id` that isn't in `roles`.
 
-Pass `--strict` to exit non-zero when anything fails verification — for batch runs
+Pass `--strict` to exit non-zero when any quote is hallucinated — for batch runs
 where you want a bad extraction to stop the pipeline rather than land in `output/`.
 
 ```bash
-uv run pytest    # 26 tests covering the tiers, stitch repair, and rejection cases
+uv run pytest    # 31 tests covering the tiers, stitch repair, rejection, and spec conformance
 ```
 
 ## Changing the prompt

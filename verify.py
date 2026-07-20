@@ -14,14 +14,22 @@ recorded tier is also a measure of how far the quote drifted from the source:
     loose       + casefolded and stripped to alphanumerics — catches quotes whose
                 punctuation the model rewrote; worth a human glance
 
-A quote that matches no tier keeps its text and is marked unverified rather than
-dropped, so a reviewer can see what the model claimed and judge it.
+A quote that matches no tier keeps its text and is marked HALLUCINATED rather
+than dropped, so a reviewer can see what the model claimed and judge it.
+
+The spec's supporting_quotes object is {text, location}; verification adds
+`verbatim` and `repaired` alongside those, leaving the spec fields untouched.
 """
 
 import re
 import unicodedata
 
 MATCH_TIERS = ("exact", "normalized", "loose")
+
+# The `verbatim` value for a quote found nowhere in the document. An explicit
+# mark rather than null: a consumer that forgets to check gets a conspicuous
+# string, not a falsy blank that reads like "no data".
+HALLUCINATED = "hallucinated"
 
 # Model's known stitching artifact: joining distant passages into one "quote".
 ELLIPSIS_SPLIT = re.compile(r"\s*(?:\.\.\.|…|\[\.\.\.\])\s*")
@@ -110,13 +118,23 @@ def _split_stitched(text: str, index: DocumentIndex) -> list[tuple[str, str]] | 
     Returns [(text, tier), ...] if every span verifies, else None — a partial
     repair is not a repair, and keeping only the half that matched would
     misrepresent what the document says.
+
+    Every fragment must verify, but fragments shorter than MIN_SPAN_WORDS are
+    dropped rather than emitted: a bare role name ("Producer") matches almost
+    any document by coincidence, so keeping it as a verified quote would inflate
+    the pass rate with spans that are labels, not evidence.
     """
     fragments = [f for f in ELLIPSIS_SPLIT.split(text) if f.strip()]
     if len(fragments) >= 2:
         tiers = [index.match_tier(f) for f in fragments]
         if not all(tiers):
             return None
-        return list(zip((_collapse(f) for f in fragments), tiers))
+        spans = [
+            (_collapse(f), tier)
+            for f, tier in zip(fragments, tiers)
+            if len(f.split()) >= MIN_SPAN_WORDS
+        ]
+        return spans or None
 
     words = _collapse(text).split()
     if len(words) < 2 * MIN_SPAN_WORDS:
@@ -130,7 +148,11 @@ def _split_stitched(text: str, index: DocumentIndex) -> list[tuple[str, str]] | 
 
 
 def verify_quotes(quotes: list[dict], index: DocumentIndex) -> list[dict]:
-    """Return quotes annotated with `verified`, `match_tier` and `repaired`.
+    """Return quotes annotated with `verbatim` and `repaired`.
+
+    `verbatim` is the tier the quote matched at, or HALLUCINATED if it appears
+    nowhere in the document — so the one field answers both "is this real?" and
+    "how far did it drift?".
 
     Stitched quotes are split into one object per verifying span, each flagged
     `repaired` so a reviewer can tell a quote the model emitted cleanly from one
@@ -144,21 +166,18 @@ def verify_quotes(quotes: list[dict], index: DocumentIndex) -> list[dict]:
 
         tier = index.match_tier(text)
         if tier:
-            result.append(
-                {**quote, "text": _collapse(text), "verified": True, "match_tier": tier, "repaired": False}
-            )
+            result.append({**quote, "text": _collapse(text), "verbatim": tier, "repaired": False})
             continue
 
         spans = _split_stitched(text, index)
         if spans:
             result.extend(
-                {**quote, "text": span, "verified": True, "match_tier": tier, "repaired": True}
-                for span, tier in spans
+                {**quote, "text": span, "verbatim": tier, "repaired": True} for span, tier in spans
             )
             continue
 
         result.append(
-            {**quote, "text": _collapse(text), "verified": False, "match_tier": None, "repaired": False}
+            {**quote, "text": _collapse(text), "verbatim": HALLUCINATED, "repaired": False}
         )
     return result
 
@@ -179,7 +198,7 @@ def verify_extraction(extracted: dict, document_text: str) -> dict:
         rel["supporting_quotes"] = verify_quotes(rel["supporting_quotes"], index)
         all_quotes.extend((f"relationship {i}", q) for q in rel["supporting_quotes"])
 
-    unverified = [(owner, q) for owner, q in all_quotes if not q["verified"]]
+    hallucinated = [(owner, q) for owner, q in all_quotes if q["verbatim"] == HALLUCINATED]
 
     role_ids = {r["id"] for r in extracted["roles"]}
     dangling = [
@@ -191,15 +210,12 @@ def verify_extraction(extracted: dict, document_text: str) -> dict:
 
     return {
         "total_quotes": len(all_quotes),
-        "verified_quotes": len(all_quotes) - len(unverified),
-        "unverified_quotes": len(unverified),
-        "by_match_tier": {
-            tier: sum(1 for _, q in all_quotes if q["match_tier"] == tier)
-            for tier in MATCH_TIERS
+        "verbatim_quotes": len(all_quotes) - len(hallucinated),
+        "hallucinated_quotes": len(hallucinated),
+        "by_verbatim_tier": {
+            tier: sum(1 for _, q in all_quotes if q["verbatim"] == tier) for tier in MATCH_TIERS
         },
         "repaired_quotes": sum(1 for _, q in all_quotes if q["repaired"]),
-        "unverified_detail": [
-            {"owner": owner, "text": q["text"]} for owner, q in unverified
-        ],
+        "hallucinated_detail": [{"owner": owner, "text": q["text"]} for owner, q in hallucinated],
         "dangling_role_ids": dangling,
     }
