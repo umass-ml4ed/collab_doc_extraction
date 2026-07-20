@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Input documents and extraction results — not for distribution
+data/
+output/
+*.zip
+
+# Internal working notes
+CLAUDE.md
+Role_Extraction_V1_Specification.docx.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

@@ -1,0 +1,40 @@
+You are analyzing a curricular document (project brief, assignment prompt, rubric, checklist, etc.) from a project-based learning classroom. Your task is to extract the ROLE STRUCTURE of the assignment: the named positions, perspectives, or functions that situate a student within the work.
+
+A role is anything the teacher or rubric treats as "this is who you are in this task and what that means for your work." Roles may be:
+- explicit — stated directly (e.g. "you are the Director of Photography"), or
+- inferred — never named as a role, but implied by differentiated expectations for different students (e.g. "historical positioners should...").
+
+Extract only STUDENT roles: positions a student occupies or could occupy in the assignment. Do not extract the teacher, outside mentors, or audiences as roles unless students are asked to take on that position themselves.
+
+## Extraction rules
+
+1. **Verbatim evidence.** Every role and every relationship must carry supporting_quotes copied EXACTLY from the document text — character for character, no paraphrasing, no fixing typos. Each quote must be ONE contiguous span of the document: never join separate passages with "..." or by stitching fragments together. If the evidence lives in two places, emit two separate quote objects. Explicit roles need at least one quote; for inferred roles give the closest supporting text. For each quote, set location to the section heading or page marker (e.g. "Page 2") where it appears, or null if unclear.
+
+2. **Confidence scores.** Give each role, and the role_structure as a whole, a confidence between 0.0 and 1.0: your confidence that it is a genuine, correctly-captured role (or correctly-characterized structure). Clearly-named roles with defined duties should score high (0.9-0.98); inferred or loosely-defined roles should score noticeably lower so they can be flagged for human review. Reserve 1.0 for nothing — some uncertainty always remains.
+
+3. **Responsibilities.** For each role, list its specific behaviors, tasks, or analytical lenses as responsibilities, each with a short summary label and a 1-2 sentence detail.
+
+4. **Role IDs.** Give each role a stable snake_case id derived from its name (e.g. "director_of_photography"). Every id listed in a relationship's role_ids must exactly match the id of a role in the roles array — never abbreviate or invent ids there.
+
+5. **Relationships.** In role_structure.relationships, capture explicit dependencies or interactions BETWEEN roles:
+   - peer — roles have equal standing and comparable responsibilities
+   - hierarchical — one role oversees or directs another
+   - handoff — one role's output is the input for the next
+   - complementary — roles cover different aspects of the same shared deliverable
+   Only include relationships the document actually supports with quotable evidence. Look carefully for cross-references between role descriptions: one role leading, supporting, or signing off on others; one role's output being handed to another (e.g. footage passed to an editor); roles explicitly sharing a deliverable. Text inside one role's own description is valid evidence for a relationship. Do not leave relationships empty when such cross-references exist.
+
+6. **Assignment method.** Set role_structure.assignment_method to how roles are distributed among students: "teacher_assigned", "student_chosen", "rotating", or "unspecified" if the document doesn't say.
+
+7. **Roleless documents.** If the document defines no distinct student roles, return an empty roles array, an empty relationships array, and set extraction_notes to a flag such as "no distinct student roles identified". Do not invent roles.
+
+8. **document_type.** Classify the document (e.g. "project brief", "rubric", "prompt", "checklist", "calendar", "slides"), or null if unclear.
+
+9. **extraction_notes.** Use for document-level flags worth a human reviewer's attention (e.g. "roles implied but never named", "single-role assignment", "text extraction appears garbled"). Otherwise null.
+
+## Document
+
+Filename: {{ filename }}
+
+<document>
+{{ document_text }}
+</document>
