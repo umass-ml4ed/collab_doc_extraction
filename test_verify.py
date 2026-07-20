@@ -1,0 +1,230 @@
+"""Tests for deterministic quote verification.
+
+The document fixtures deliberately contain the artifacts pypdf actually
+produces — curly quotes, en dashes, line-break hyphenation — so the tiers are
+tested against the failure modes they exist for.
+"""
+
+import pytest
+
+from verify import DocumentIndex, normalize, verify_extraction, verify_quotes
+
+DOC = """--- Page 1 ---
+Western Films Job Descriptions
+
+The Director of Photography is responsible for the visual language of the film.
+They frame every shot and hand the raw footage to the Editor at the end of
+each shoot day.
+
+The Editor assembles the footage into a coherent narrative. The teacher will
+assign roles during the first week; students don’t choose their own.
+
+Historical positioners must situate the film within its period – an era of
+rapid collabo-
+ration between studios.
+"""
+
+
+@pytest.fixture
+def index():
+    return DocumentIndex(DOC)
+
+
+def quote(text):
+    return {"text": text, "location": None}
+
+
+def verify_one(text, index):
+    """Verify a single quote and return its annotated form."""
+    result = verify_quotes([quote(text)], index)
+    assert len(result) == 1
+    return result[0]
+
+
+class TestExactTier:
+    def test_contiguous_span_verifies(self, index):
+        q = verify_one("frame every shot and hand the raw footage to the Editor", index)
+        assert q["verified"] and q["match_tier"] == "exact"
+
+    def test_span_crossing_a_line_break_verifies(self, index):
+        """Line breaks in the PDF are whitespace, not content."""
+        q = verify_one("hand the raw footage to the Editor at the end of each shoot day", index)
+        assert q["verified"] and q["match_tier"] == "exact"
+
+    def test_irregular_internal_spacing_verifies(self, index):
+        q = verify_one("The   Editor    assembles the footage", index)
+        assert q["verified"] and q["match_tier"] == "exact"
+
+    def test_text_is_stored_whitespace_collapsed(self, index):
+        q = verify_one("The   Editor    assembles the footage", index)
+        assert q["text"] == "The Editor assembles the footage"
+
+
+class TestNormalizedTier:
+    def test_curly_apostrophe_matches_straight(self, index):
+        q = verify_one("students don't choose their own", index)  # U+2019
+        assert q["verified"] and q["match_tier"] == "normalized"
+
+    def test_em_dash_matches_en_dash(self, index):
+        q = verify_one("within its period — an era", index)
+        assert q["verified"] and q["match_tier"] == "normalized"
+
+    def test_linebreak_hyphenation_is_undone(self, index):
+        """pypdf leaves 'collabo- ration'; the real word is 'collaboration'."""
+        q = verify_one("an era of rapid collaboration between studios", index)
+        assert q["verified"] and q["match_tier"] == "normalized"
+
+
+class TestLooseTier:
+    def test_case_and_punctuation_drift_matches_loosely(self, index):
+        q = verify_one("the director of photography is responsible", index)
+        assert q["verified"] and q["match_tier"] == "loose"
+
+
+class TestRejection:
+    def test_fabricated_quote_is_unverified(self, index):
+        q = verify_one("Students will present their work to a panel of judges.", index)
+        assert not q["verified"] and q["match_tier"] is None
+
+    def test_unverified_quote_text_is_preserved_not_dropped(self, index):
+        """A reviewer has to be able to see what the model claimed."""
+        fabricated = "Students will present their work to a panel of judges."
+        q = verify_one(fabricated, index)
+        assert q["text"] == fabricated
+
+    def test_plausible_paraphrase_is_rejected(self, index):
+        """Loose tier folds punctuation and case, never wording."""
+        q = verify_one("The Editor puts the footage together into a narrative", index)
+        assert not q["verified"]
+
+    def test_empty_quote_is_unverified(self, index):
+        assert not verify_one("   ", index)["verified"]
+
+
+class TestStitchedQuotes:
+    def test_ellipsis_stitched_quote_splits_into_verifying_spans(self, index):
+        q = verify_quotes(
+            [quote("The Editor assembles the footage ... assign roles during the first week")],
+            index,
+        )
+        assert len(q) == 2
+        assert all(part["verified"] for part in q)
+        assert q[0]["text"] == "The Editor assembles the footage"
+        assert q[1]["text"] == "assign roles during the first week"
+
+    def test_partial_stitch_repair_is_rejected_wholesale(self, index):
+        """Half-real evidence is not evidence; keeping the real half would
+        misrepresent a quote the model partly invented."""
+        q = verify_quotes(
+            [quote("The Editor assembles the footage ... and emails it to the principal")],
+            index,
+        )
+        assert len(q) == 1 and not q[0]["verified"]
+
+    def test_row_header_prepended_to_cell_is_split(self, index):
+        """Table layout: the model glues a row header onto a cell's contents
+        with no delimiter. Both halves are real; only the join is invented."""
+        q = verify_quotes(
+            [quote("The Editor assembles the footage The teacher will assign roles")],
+            index,
+        )
+        assert len(q) == 2
+        assert all(part["verified"] and part["repaired"] for part in q)
+
+    def test_split_requires_both_sides_to_verify(self, index):
+        q = verify_quotes(
+            [quote("The Editor assembles the footage and then posts it online")], index
+        )
+        assert len(q) == 1 and not q[0]["verified"]
+
+    def test_short_spans_are_not_split(self, index):
+        """A two-word span matches by coincidence, not by being evidence."""
+        q = verify_quotes([quote("The Editor the film")], index)
+        assert len(q) == 1 and not q[0]["verified"]
+
+    def test_cleanly_matching_quote_is_not_marked_repaired(self, index):
+        assert verify_one("The Editor assembles the footage", index)["repaired"] is False
+
+    def test_stitch_metadata_is_carried_to_each_span(self, index):
+        q = verify_quotes(
+            [{"text": "The Editor assembles the footage ... first week", "location": "Page 1"}],
+            index,
+        )
+        assert [part["location"] for part in q] == ["Page 1", "Page 1"]
+
+
+class TestNormalizeIsPure:
+    def test_tiers_are_idempotent(self):
+        for tier in ("exact", "normalized", "loose"):
+            once = normalize(DOC, tier)
+            assert normalize(once, tier) == once
+
+    def test_unknown_tier_raises(self):
+        with pytest.raises(ValueError):
+            normalize("text", "fuzzy")
+
+
+class TestVerifyExtraction:
+    def extraction(self, **overrides):
+        base = {
+            "document_type": "project brief",
+            "roles": [
+                {
+                    "id": "editor",
+                    "name": "Editor",
+                    "description": "...",
+                    "responsibilities": [],
+                    "supporting_quotes": [quote("The Editor assembles the footage")],
+                    "source": "explicit",
+                    "confidence": 0.9,
+                }
+            ],
+            "role_structure": {
+                "assignment_method": "teacher_assigned",
+                "relationships": [],
+                "confidence": 0.8,
+            },
+            "extraction_notes": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_summary_counts_quotes(self):
+        summary = verify_extraction(self.extraction(), DOC)
+        assert summary["total_quotes"] == 1
+        assert summary["verified_quotes"] == 1
+        assert summary["unverified_quotes"] == 0
+        assert summary["by_match_tier"]["exact"] == 1
+
+    def test_unverified_quote_is_reported_with_owner(self):
+        extracted = self.extraction()
+        extracted["roles"][0]["supporting_quotes"] = [quote("invented text")]
+        summary = verify_extraction(extracted, DOC)
+        assert summary["unverified_quotes"] == 1
+        assert summary["unverified_detail"][0]["owner"] == "role editor"
+
+    def test_dangling_relationship_role_id_is_flagged(self):
+        extracted = self.extraction()
+        extracted["role_structure"]["relationships"] = [
+            {
+                "role_ids": ["editor", "director_of_photography"],
+                "relationship_type": "handoff",
+                "detail": "...",
+                "supporting_quotes": [],
+            }
+        ]
+        summary = verify_extraction(extracted, DOC)
+        assert len(summary["dangling_role_ids"]) == 1
+        assert "director_of_photography" in summary["dangling_role_ids"][0]
+
+    def test_annotations_are_written_back_into_the_extraction(self):
+        extracted = self.extraction()
+        verify_extraction(extracted, DOC)
+        assert extracted["roles"][0]["supporting_quotes"][0]["verified"] is True
+
+    def test_roleless_document_verifies_cleanly(self):
+        summary = verify_extraction(
+            self.extraction(roles=[]), DOC
+        )
+        assert summary["total_quotes"] == 0
+        assert summary["unverified_quotes"] == 0
