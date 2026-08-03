@@ -146,18 +146,24 @@ alongside them:
 { "text": "...", "location": "Page 2", "verbatim": "exact", "repaired": false }
 ```
 
-The tiers exist because pypdf's extraction is lossy in known ways, not to give the model
-latitude. They're tried in order, first hit wins, so the recorded tier also says how far
-the quote drifted:
+The tiers exist because pypdf's extraction is lossy in known ways — and because the model
+rarely reproduces non-ASCII glyphs faithfully — not to give the model latitude. They're
+tried in order, first hit wins, so the recorded tier also says how far the quote drifted:
 
 | `verbatim` | What it tolerates | Read it as |
 | --- | --- | --- |
 | `"exact"` | Whitespace collapsing only | Character-for-character verbatim |
-| `"normalized"` | Unicode punctuation folded, soft hyphens and line-break hyphenation undone | Verbatim; the difference is a PDF artifact |
+| `"normalized"` | Unicode punctuation and bullet glyphs folded, soft hyphens and line-break hyphenation undone | Verbatim; the difference is a PDF or transcription artifact |
 | `"loose"` | Case and all non-alphanumeric characters | Wording matches, punctuation was rewritten — worth a glance |
 | `"hallucinated"` | — | **Not in the document.** The model made it up |
 
 No tier tolerates different *wording*, so a paraphrase always lands in `"hallucinated"`.
+
+Bullets get special handling because they dominate this corpus: one checklist carries 76
+of them, and the model typically emits a control character where the document has `●`.
+Bullet glyphs and stray control characters fold to a single marker in `normalized`.
+Folding to a marker rather than deleting is deliberate — a quote that drops the list
+structure entirely still falls through to `loose`, so `normalized` can't blur into it.
 
 The mark for a fabricated quote is the string `"hallucinated"`, never `null`. A consumer
 that forgets to check gets something conspicuous rather than a falsy blank that reads
@@ -212,7 +218,7 @@ Pass `--strict` to exit non-zero when any quote is hallucinated — for batch ru
 where you want a bad extraction to stop the pipeline rather than land in `output/`.
 
 ```bash
-uv run pytest    # 31 tests covering the tiers, stitch repair, rejection, and spec conformance
+uv run pytest    # 40 tests covering the tiers, bullet folding, stitch repair, rejection, and spec conformance
 ```
 
 ## Changing the prompt

@@ -82,6 +82,50 @@ class TestNormalizedTier:
         assert q["verbatim"] == "normalized"
 
 
+class TestBulletFolding:
+    """Bullets are the dominant artifact in the real corpus, and the model
+    almost never reproduces the glyph it was shown."""
+
+    BULLET_DOC = DocumentIndex(
+        "Production Designer Pre Production: ● Costume ● Sizes of Actors "
+        "● Source Pieces We Already Have Access To"
+    )
+
+    def test_control_char_bullet_matches_glyph_bullet(self):
+        """The model emits \\x7f where the document has ●. This single mismatch
+        was pushing every bullet-list quote down to the loose tier."""
+        q = verify_one("\x7f Costume \x7f Sizes of Actors", self.BULLET_DOC)
+        assert q["verbatim"] == "normalized"
+
+    def test_assorted_bullet_glyphs_are_interchangeable(self):
+        for glyph in "•○▪‣-":
+            if glyph == "-":
+                continue
+            q = verify_one(f"{glyph} Costume {glyph} Sizes of Actors", self.BULLET_DOC)
+            assert q["verbatim"] == "normalized", glyph
+
+    def test_bullet_spacing_is_canonicalized(self):
+        q = verify_one("●Costume    ●   Sizes of Actors", self.BULLET_DOC)
+        assert q["verbatim"] == "normalized"
+
+    def test_dropping_bullets_does_not_match_at_normalized(self):
+        """Folding to a marker rather than deleting keeps `normalized` from
+        blurring into `loose`: a quote that omits the list structure still has
+        to fall through."""
+        q = verify_one("Costume Sizes of Actors", self.BULLET_DOC)
+        assert q["verbatim"] == "loose"
+
+    def test_bullet_folding_still_rejects_wrong_wording(self):
+        q = verify_one("● Costume ● Heights of Actors", self.BULLET_DOC)
+        assert q["verbatim"] == HALLUCINATED
+
+    def test_control_chars_do_not_rescue_mangled_words(self):
+        """A control char folds to a bullet, but junk the model inserted into a
+        word is still wrong wording."""
+        q = verify_one("● 9Costume9 ● Sizes of Actors", self.BULLET_DOC)
+        assert q["verbatim"] == HALLUCINATED
+
+
 class TestLooseTier:
     def test_case_and_punctuation_drift_matches_loosely(self, index):
         q = verify_one("the director of photography is responsible", index)

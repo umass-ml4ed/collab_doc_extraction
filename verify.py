@@ -9,8 +9,9 @@ give the model latitude. They are tried in order and the first hit wins, so the
 recorded tier is also a measure of how far the quote drifted from the source:
 
     exact       whitespace collapsed only — the quote is character-for-character
-    normalized  + unicode punctuation folded, soft hyphens and line-break
-                hyphenation undone (pypdf artifacts, not authorial differences)
+    normalized  + unicode punctuation and bullet glyphs folded, soft hyphens and
+                line-break hyphenation undone (pypdf and transcription artifacts,
+                not authorial differences)
     loose       + casefolded and stripped to alphanumerics — catches quotes whose
                 punctuation the model rewrote; worth a human glance
 
@@ -33,6 +34,23 @@ HALLUCINATED = "hallucinated"
 
 # Model's known stitching artifact: joining distant passages into one "quote".
 ELLIPSIS_SPLIT = re.compile(r"\s*(?:\.\.\.|…|\[\.\.\.\])\s*")
+
+# Bullet and list-marker glyphs, all folded to one marker.
+#
+# Bullets are the dominant artifact in this corpus (one checklist carries 76 of
+# them) and the model rarely reproduces the glyph it was shown: it typically
+# emits a C0/C1 control character instead. Real extracted document text contains
+# no control characters at all, so a control character in a quote is always
+# transcription noise — folding it to the same marker as a literal bullet lets a
+# bullet-list quote verify.
+#
+# Folding to a marker rather than deleting is deliberate. A quote that drops the
+# bullets entirely still will not match at this tier and falls through to
+# `loose`, which keeps `normalized` from quietly blurring into it.
+BULLET = "•"
+BULLET_GLYPHS = "●○◦▪▫■□‣⁃∙⋅·•"
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+BULLET_SPACING = re.compile(rf"\s*{BULLET}\s*")
 
 # pypdf emits these for typographic characters in the PDF; the underlying
 # document text is the ASCII equivalent, so folding them loses no meaning.
@@ -68,7 +86,11 @@ def normalize(text: str, tier: str) -> str:
         return _collapse(text)
 
     folded = unicodedata.normalize("NFKC", text)
-    folded = "".join(PUNCTUATION_FOLD.get(ch, ch) for ch in folded)
+    folded = CONTROL_CHARS.sub(BULLET, folded)
+    folded = "".join(
+        BULLET if ch in BULLET_GLYPHS else PUNCTUATION_FOLD.get(ch, ch) for ch in folded
+    )
+    folded = BULLET_SPACING.sub(f" {BULLET} ", folded)
     folded = _collapse(folded)
     folded = LINEBREAK_HYPHEN.sub(r"\1\2", folded)
     if tier == "normalized":
